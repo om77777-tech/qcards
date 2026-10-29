@@ -97,6 +97,7 @@ summary{cursor:pointer;font-size:15px}
 .pcard .q{grid-column:2;grid-row:2;display:flex;align-items:center;justify-content:center}
 .pcard .q svg{width:100%;height:100%}
 .pcard .nm{direction:rtl;grid-column:1/4;grid-row:4;text-align:center;font-size:9pt;padding:2px 4px 4px;color:#333}
+.pcard .nm.many{font-size:7.5pt;line-height:1.5}
 .ppage{display:flex;flex-direction:column;justify-content:space-around;gap:6mm;height:270mm;page-break-after:always;break-after:page}
 .ppage.g4{display:grid;grid-template-columns:1fr 1fr;align-content:space-around}
 .ppage:last-child{page-break-after:auto;break-after:auto}
@@ -265,7 +266,7 @@ var QC = (function () {
 if (typeof module !== 'undefined') module.exports = QC;
 </script>
 <script>
-var VERSION = '1.0';
+var VERSION = '1.1';
 document.getElementById('ver').textContent = VERSION;
 var KEY = 'qcards-data';
 var LBL = function (l) { return l ? QC.AR[l] + ' (' + l + ')' : '—'; };
@@ -430,15 +431,38 @@ var SIZES = { big: { per: 1, cw: '170mm', lab: '20mm', fs: '22pt' }, mid: { per:
 VIEWS.cards = function () {
   if (!DB.classes.length) return noClasses();
   var c = cls(UI.classId) || DB.classes[0]; UI.classId = c.id;
-  var h = '<div class="box"><h2>طباعة بطاقات الطلاب</h2><label class="f">الفصل</label><select data-chg="cardsClass">' + classOptions(c.id) + '</select>';
+  var h = '<div class="box"><h2>طباعة بطاقات الطلاب</h2>';
+  if ((UI.cWho || 'all') !== 'shared') h += '<label class="f">الفصل</label><select data-chg="cardsClass">' + classOptions(c.id) + '</select>';
   h += '<label class="f">حجم البطاقة</label><select id="cSize"><option value="big">كبيرة: بطاقة في كل صفحة (للفصول الكبيرة والمسافات البعيدة)</option><option value="mid" selected>متوسطة: بطاقتان في كل صفحة</option><option value="small">صغيرة: أربع بطاقات في كل صفحة</option></select>';
-  h += '<label class="f">الطلاب</label><select id="cWho"><option value="all">كل طلاب الفصل</option><option value="blank">بطاقات بأرقام فقط بدون أسماء (١ إلى ٤٠)</option></select>';
+  var who = UI.cWho || 'all';
+  h += '<label class="f">الطلاب</label><select id="cWho" data-chg="cWho">' + [['all', 'كل طلاب الفصل'], ['shared', 'بطاقات مشتركة لعدة فصول (تحت كل بطاقة أسماء من يشتركون في الرقم)'], ['blank', 'بطاقات بأرقام فقط بدون أسماء (١ إلى ٤٠)']].map(function (o) {
+    return '<option value="' + o[0] + '"' + (who === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>';
+  if (who === 'shared') {
+    if (!UI.cShared) UI.cShared = DB.classes.map(function (x) { return x.id; });
+    h += '<label class="f">الفصول المشتركة في البطاقات</label><div class="chips">' + DB.classes.map(function (x) {
+      return '<label class="chip"><input type="checkbox" class="cSh" data-chg="cShared" value="' + x.id + '"' + (UI.cShared.indexOf(x.id) >= 0 ? ' checked' : '') + '>' + esc(x.name) + ' · ' + x.students.length + '</label>'; }).join('') + '</div>';
+    h += '<p class="muted" style="margin-bottom:0">عدد البطاقات = عدد طلاب أكبر فصل مختار. رقم البطاقة يُقرأ للطالب الذي يحمل الرقم نفسه في الفصل المختار عند بدء الحصة.</p>';
+  }
   h += '<div class="row" style="margin-top:12px"><button class="btn pri" data-act="printCards">طباعة</button></div>';
   h += '<p class="muted">الطالب يرفع البطاقة باتجاه المعلم، ويجعل الحرف الذي يختاره في الأعلى. اطبع على ورق أبيض بدون تكبير أو تصغير، ويُفضّل الورق المقوّى.</p></div>';
   h += '<div class="box"><h3>معاينة</h3><div style="--cw:240px;--lab:30px;--fs:15px">' + cardHtml(c.students[0] ? sortedStudents(c)[0] : { no: 1, name: 'اسم الطالب' }, c) + '</div></div>';
   return h;
 };
 CHG.cardsClass = function (s) { UI.classId = s.value; render(); };
+CHG.cWho = function (s) { UI.cWho = s.value; render(); };
+CHG.cShared = function () { UI.cShared = Array.prototype.map.call(document.querySelectorAll('.cSh:checked'), function (x) { return x.value; }); render(); };
+/* بطاقات مشتركة: لكل رقم أسماء الطلاب الذين يحملونه في الفصول المختارة */
+function sharedList(ids) {
+  var cs = ids.map(cls).filter(Boolean), max = 0;
+  cs.forEach(function (c) { c.students.forEach(function (s) { if (s.no > max) max = s.no; }); });
+  var out = [];
+  for (var n = 1; n <= max; n++) {
+    var parts = [];
+    cs.forEach(function (c) { var s = c.students.find(function (x) { return x.no === n; }); if (s) parts.push(esc(s.name) + ' (' + esc(c.name) + ')'); });
+    if (parts.length) out.push({ no: n, line: n + ' — ' + parts.join(' · ') });
+  }
+  return out;
+}
 function qrSvg(no) {
   var qr = qrcode(0, 'H'); qr.addData(QC.payload(no), 'Alphanumeric'); qr.make();
   var n = qr.getModuleCount(), m = 1, d = '';
@@ -448,12 +472,12 @@ function qrSvg(no) {
 function cardHtml(s, c) {
   var lab = function (k, l) { return '<div class="lab ' + k + '"><span>' + l + ' · ' + QC.AR[l] + '</span></div>'; };
   return '<div class="pcard">' + lab('t', 'A') + lab('r', 'B') + lab('b', 'C') + lab('l', 'D') +
-    '<div class="q">' + qrSvg(s.no) + '</div><div class="nm">' + s.no + (s.name ? ' — ' + esc(s.name) : '') + (c && s.name ? ' — ' + esc(c.name) : '') + '</div></div>';
+    '<div class="q">' + qrSvg(s.no) + '</div><div class="nm' + (s.line ? ' many' : '') + '">' + (s.line || (s.no + (s.name ? ' — ' + esc(s.name) : '') + (c && s.name ? ' — ' + esc(c.name) : ''))) + '</div></div>';
 }
 ACT.printCards = function () {
   var c = cls(UI.classId), sz = SIZES[document.getElementById('cSize').value], who = document.getElementById('cWho').value;
-  var list = who === 'blank' ? Array.from({ length: 40 }, function (_, i) { return { no: i + 1, name: '' }; }) : sortedStudents(c);
-  if (!list.length) { toast('لا يوجد طلاب في هذا الفصل'); return; }
+  var list = who === 'blank' ? Array.from({ length: 40 }, function (_, i) { return { no: i + 1, name: '' }; }) : who === 'shared' ? sharedList(UI.cShared || []) : sortedStudents(c);
+  if (!list.length) { toast(who === 'shared' ? 'اختر فصلًا فيه طلاب' : 'لا يوجد طلاب في هذا الفصل'); return; }
   var pages = '';
   for (var i = 0; i < list.length; i += sz.per) {
     pages += '<div class="ppage' + (sz.per === 4 ? ' g4' : '') + '">' + list.slice(i, i + sz.per).map(function (s) { return cardHtml(s, who === 'blank' ? null : c); }).join('') + '</div>';
