@@ -83,6 +83,12 @@ th{color:var(--muted);font-weight:500}
 .letters button.on{background:var(--ok);border-color:var(--ok);color:#fff}
 details{border-top:1px solid var(--line);padding-top:8px;margin-top:8px}
 summary{cursor:pointer;font-size:15px}
+body.wide main{max-width:none;padding-left:20px;padding-right:20px}
+.disp .dgrid{grid-template-columns:repeat(auto-fill,minmax(90px,1fr))}
+.disp .cell{font-size:clamp(22px,2.6vw,36px)}
+.disp-name .dgrid,.disp-both .dgrid{grid-template-columns:repeat(auto-fill,minmax(170px,1fr))}
+.disp-name .cell,.disp-both .cell{aspect-ratio:auto;min-height:58px;font-size:clamp(15px,1.5vw,22px);padding:6px;text-align:center;line-height:1.3}
+.letters button.sm.on{background:var(--brand);border-color:var(--brand);color:#fff}
 #toast{position:fixed;bottom:calc(env(safe-area-inset-bottom) + 16px);left:50%;transform:translateX(-50%);background:#1f1f1d;color:#fff;padding:9px 16px;border-radius:999px;font-size:14px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:20}
 #toast.show{opacity:.95}
 /* البطاقات المطبوعة */
@@ -98,11 +104,11 @@ summary{cursor:pointer;font-size:15px}
 .pcard .q svg{width:100%;height:100%}
 .pcard .nm{direction:rtl;grid-column:1/4;grid-row:4;text-align:center;font-size:9pt;padding:2px 4px 4px;color:#333}
 .pcard .nm.many{font-size:7.5pt;line-height:1.5}
-.ppage{display:flex;flex-direction:column;justify-content:space-around;gap:6mm;height:270mm;page-break-after:always;break-after:page}
-.ppage.g4{display:grid;grid-template-columns:1fr 1fr;align-content:space-around}
+.ppage{display:flex;flex-direction:column;justify-content:space-around;gap:2mm;height:278mm;page-break-after:always;break-after:page}
+.ppage.g4{display:grid;grid-template-columns:1fr 1fr;gap:2mm;align-content:space-around;justify-items:center}
 .ppage:last-child{page-break-after:auto;break-after:auto}
 @media print{
-  @page{size:A4;margin:12mm}
+  @page{size:A4;margin:8mm}
   body{background:#fff}
   body.p-cards header,body.p-cards main,#toast,body.p-report header{display:none!important}
   body.p-cards #print{display:block}
@@ -123,6 +129,7 @@ summary{cursor:pointer;font-size:15px}
     <button data-go="questions">بنك الأسئلة</button>
     <button data-go="cards">طباعة البطاقات</button>
     <button data-go="reports">التقارير</button>
+    <button data-go="display">شاشة العرض</button>
     <button data-go="backup">النسخ الاحتياطي</button>
   </nav>
 </header>
@@ -229,7 +236,7 @@ var QC = (function () {
       var r = jsQR(data, w, h, { inversionAttempts: 'dontInvert' });
       if (!r) break;
       var no = parse(r.data);
-      if (no != null) found.push({ no: no, letter: letterFromLocation(r.location), loc: r.location });
+      found.push({ no: no, letter: letterFromLocation(r.location), loc: r.location, data: r.data });
       var b = bbox(r.location, 0.15);
       var x0 = Math.max(0, Math.floor(b.x0)), x1 = Math.min(w, Math.ceil(b.x1));
       var y0 = Math.max(0, Math.floor(b.y0)), y1 = Math.min(h, Math.ceil(b.y1));
@@ -265,8 +272,123 @@ var QC = (function () {
 })();
 if (typeof module !== 'undefined') module.exports = QC;
 </script>
+<script>/* الربط بين الجوال وشاشة العرض: MQTT خفيف فوق WebSocket مع تشفير AES-GCM.
+   لنقله لخادم آخر يكفي تغيير قائمة RELAYS. */
+var RELAYS = (typeof window !== 'undefined' && window.QC_RELAYS) || [
+  'wss://broker.hivemq.com:8884/mqtt',
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://test.mosquitto.org:8081/mqtt'
+];
+var TOPIC = 'qcards/v1/';
+
+var Mqtt = (function () {
+  var enc = new TextEncoder(), dec = new TextDecoder();
+  function str(s) { var b = enc.encode(s); return [b.length >> 8, b.length & 255].concat(Array.from(b)); }
+  function packet(type, body) {
+    var len = body.length, hdr = [type];
+    do { var d = len % 128; len = Math.floor(len / 128); if (len > 0) d |= 128; hdr.push(d); } while (len > 0);
+    var out = new Uint8Array(hdr.length + body.length); out.set(hdr); out.set(body, hdr.length); return out;
+  }
+  function concat(a, b) { var o = new Uint8Array(a.length + b.length); o.set(a); o.set(b, a.length); return o; }
+
+  /* اتصال يعيد المحاولة تلقائيًا ويعيد الاشتراك */
+  function Client(url) {
+    this.url = url; this.subs = []; this.onmessage = null; this.onstate = null; this.ok = false; this.closed = false; this.delay = 1000; this.pid = 1;
+    this._open();
+  }
+  Client.prototype._open = function () {
+    var self = this; if (this.closed) return;
+    var ws; try { ws = new WebSocket(this.url, ['mqtt']); } catch (e) { return this._retry(); }
+    this.ws = ws; ws.binaryType = 'arraybuffer'; this.buf = new Uint8Array(0);
+    ws.onopen = function () {
+      var id = 'qc' + Math.random().toString(36).slice(2, 12);
+      ws.send(packet(0x10, [].concat(str('MQTT'), [4, 0x02, 0, 40], str(id))));
+    };
+    ws.onmessage = function (e) { self.buf = concat(self.buf, new Uint8Array(e.data)); self._parse(); };
+    ws.onclose = function () { self._down(); self._retry(); };
+    ws.onerror = function () { try { ws.close(); } catch (e) {} };
+  };
+  Client.prototype._down = function () {
+    clearInterval(this.ping); if (this.ok) { this.ok = false; if (this.onstate) this.onstate(false); }
+  };
+  Client.prototype._retry = function () {
+    var self = this; if (this.closed) return;
+    clearTimeout(this.rt); this.rt = setTimeout(function () { self._open(); }, this.delay);
+    this.delay = Math.min(this.delay * 2, 15000);
+  };
+  Client.prototype._parse = function () {
+    for (;;) {
+      var b = this.buf; if (b.length < 2) return;
+      var mul = 1, len = 0, i = 1, d;
+      do { if (i >= b.length) return; d = b[i++]; len += (d & 127) * mul; mul *= 128; } while (d & 128);
+      if (b.length < i + len) return;
+      var type = b[0] >> 4, flags = b[0] & 15, body = b.subarray(i, i + len);
+      this.buf = b.slice(i + len);
+      if (type === 2) { /* CONNACK */
+        if (body[1] !== 0) { try { this.ws.close(); } catch (e) {} return; }
+        var self = this; this.ok = true; this.delay = 1000;
+        this.ping = setInterval(function () { self._send(new Uint8Array([0xC0, 0])); }, 20000);
+        this.subs.forEach(function (t) { self._sub(t); });
+        if (this.onstate) this.onstate(true);
+      } else if (type === 3) { /* PUBLISH */
+        var tl = (body[0] << 8) | body[1], topic = dec.decode(body.subarray(2, 2 + tl)), p = 2 + tl;
+        if ((flags >> 1) & 3) p += 2;
+        if (this.onmessage) this.onmessage(topic, body.slice(p));
+      }
+    }
+  };
+  Client.prototype._send = function (u8) { try { if (this.ws && this.ws.readyState === 1) this.ws.send(u8); } catch (e) {} };
+  Client.prototype._sub = function (t) { var id = this.pid++ & 0xffff || 1; this._send(packet(0x82, [id >> 8, id & 255].concat(str(t), [0]))); };
+  Client.prototype.subscribe = function (t) { if (this.subs.indexOf(t) < 0) this.subs.push(t); if (this.ok) this._sub(t); };
+  Client.prototype.publish = function (t, payload, retain) {
+    if (!this.ok) return false;
+    this._send(packet(0x30 | (retain ? 1 : 0), str(t).concat(Array.from(payload || [])))); return true;
+  };
+  Client.prototype.close = function () { this.closed = true; clearTimeout(this.rt); this._down(); try { this.ws.close(); } catch (e) {} };
+
+  /* يجرب الخوادم بالترتيب ويعيد رقم أول خادم يستجيب */
+  function probe(list, ms) {
+    return new Promise(function (res) {
+      var i = 0;
+      (function next() {
+        if (i >= list.length) { res(-1); return; }
+        var idx = i++, c = new Client(list[idx]), t = setTimeout(function () { c.close(); next(); }, ms || 6000);
+        c.onstate = function (up) { if (up) { clearTimeout(t); c.close(); res(idx); } };
+      })();
+    });
+  }
+  return { Client: Client, probe: probe };
+})();
+
+var Crypt = {
+  b64u: function (u8) { var s = ''; u8.forEach(function (x) { s += String.fromCharCode(x); }); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); },
+  unb64u: function (s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); }); },
+  hex: function (u8) { return Array.from(u8, function (x) { return ('0' + x.toString(16)).slice(-2); }).join(''); },
+  rand: function (n) { var a = new Uint8Array(n); crypto.getRandomValues(a); return a; },
+  key: function (b64) { return crypto.subtle.importKey('raw', Crypt.unb64u(b64), 'AES-GCM', false, ['encrypt', 'decrypt']); },
+  seal: function (key, obj) {
+    var iv = Crypt.rand(12);
+    return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, new TextEncoder().encode(JSON.stringify(obj))).then(function (c) {
+      var o = new Uint8Array(12 + c.byteLength); o.set(iv); o.set(new Uint8Array(c), 12); return o;
+    });
+  },
+  open: function (key, u8) {
+    return crypto.subtle.decrypt({ name: 'AES-GCM', iv: u8.subarray(0, 12) }, key, u8.subarray(12)).then(function (p) { return JSON.parse(new TextDecoder().decode(p)); });
+  }
+};
+
+/* كود الربط: QCL1.<رقم الخادم>.<الغرفة>.<المفتاح> */
+var Pair = {
+  make: function (b) { return { b: b, room: Crypt.hex(Crypt.rand(16)), key: Crypt.b64u(Crypt.rand(16)) }; },
+  text: function (c) { return 'QCL1.' + c.b + '.' + c.room + '.' + c.key; },
+  parse: function (s) {
+    var m = /^QCL1\.(\d+)\.([0-9a-f]{32})\.([A-Za-z0-9_-]{22})$/.exec(String(s || '').trim());
+    return m && RELAYS[+m[1]] ? { b: +m[1], room: m[2], key: m[3] } : null;
+  }
+};
+</script>
 <script>
-var VERSION = '1.1';
+var VERSION = '1.4';
 document.getElementById('ver').textContent = VERSION;
 var KEY = 'qcards-data';
 var LBL = function (l) { return l ? QC.AR[l] + ' (' + l + ')' : '—'; };
@@ -297,20 +419,27 @@ function classOptions(sel, withEmpty) {
     return '<option value="' + c.id + '"' + (c.id === sel ? ' selected' : '') + '>' + esc(c.name) + ' (' + c.students.length + ')</option>';
   }).join('');
 }
-function noClasses() { return '<div class="box empty">لا توجد فصول بعد.<br><button class="btn pri" data-go="classes" style="margin-top:10px">إضافة فصل</button></div>'; }
+function noData() {
+  return '<p class="muted" style="max-width:520px;margin:8px auto">البيانات تُحفظ في هذا الجهاز وهذا المتصفح فقط. إذا سجّلت فصولك في جهاز آخر أو متصفح آخر فانقلها بالنسخة الاحتياطية: صدّرها من هناك واستوردها هنا.</p>' +
+    '<div class="row" style="justify-content:center"><button class="btn pri" data-go="classes">إضافة فصل</button><label class="btn" style="display:inline-flex;align-items:center">استيراد نسخة احتياطية<input type="file" accept=".json,application/json" data-chg="importAll" hidden></label><button class="btn" data-go="display">شاشة العرض</button></div>';
+}
+function noClasses() { return '<div class="box empty">لا توجد فصول في هذا الجهاز.' + noData() + '</div>' + (VIEW === 'live' ? linkBox() : ''); }
 
 /* ---------- التنقل ---------- */
 var VIEW = 'live', UI = {};
 function go(v) {
-  if (VIEW === 'live' && v !== 'live') Scanner.stop();
+  if ((VIEW === 'live' || VIEW === 'pair') && v !== VIEW) Scanner.stop();
   VIEW = v; render();
+  try { sessionStorage.setItem('qcards-view', v); } catch (e) {}
   window.scrollTo(0, 0);
 }
 function render() {
   document.querySelectorAll('#nav button').forEach(function (b) { b.classList.toggle('on', b.dataset.go === VIEW); });
+  document.body.classList.toggle('wide', VIEW === 'display');
   var el = document.getElementById('view');
   el.innerHTML = (VIEWS[VIEW] || VIEWS.live)();
   if (AFTER[VIEW]) AFTER[VIEW]();
+  if (VIEW === 'live') Link.sync();
 }
 document.addEventListener('click', function (e) {
   var g = e.target.closest('[data-go]'); if (g) { go(g.dataset.go); return; }
@@ -329,7 +458,7 @@ VIEWS.classes = function () {
     return '<button class="chip" data-act="pickClass" data-id="' + x.id + '" style="' + (c && x.id === c.id ? 'border-color:var(--brand);color:var(--brand)' : '') + '">' + esc(x.name) + ' · ' + x.students.length + '</button>';
   }).join('') + '</div>';
   h += '</div>';
-  if (!c) return h + '<div class="box empty">أضف أول فصل، ثم الصق أسماء طلابه.</div>';
+  if (!c) return h + '<div class="box empty">أضف أول فصل، ثم الصق أسماء طلابه.' + noData().replace('<button class="btn pri" data-go="classes">إضافة فصل</button>', '') + '</div>';
   h += '<div class="box"><div class="row" style="justify-content:space-between"><h2 style="margin:0">' + esc(c.name) + '</h2><div class="row"><button class="btn sm" data-act="renameClass">تعديل الاسم</button><button class="btn sm bad" data-act="delClass">حذف الفصل</button></div></div>';
   h += '<label class="f">إضافة طلاب: الصق الأسماء، اسم في كل سطر (يمكن النسخ من إكسل، وإذا كان العمود الأول رقمًا يُعتمد رقمًا للطالب)</label><textarea id="roster" placeholder="أحمد محمد&#10;سالم علي&#10;خالد عبدالله"></textarea>';
   h += '<div class="row" style="margin-top:8px"><button class="btn pri" data-act="addRoster">إضافة الأسماء</button><label class="btn" style="display:inline-flex;align-items:center">استيراد ملف CSV أو نص<input type="file" accept=".csv,.txt,text/csv,text/plain" data-chg="rosterFile" hidden></label></div></div>';
@@ -427,13 +556,14 @@ ACT.delQ = function (b) { if (!confirm('حذف السؤال؟ تبقى نتائ�
 CHG.qFilter = function (s) { UI.qFilter = s.value; render(); };
 
 /* ================= طباعة البطاقات ================= */
-var SIZES = { big: { per: 1, cw: '170mm', lab: '20mm', fs: '22pt' }, mid: { per: 2, cw: '125mm', lab: '15mm', fs: '17pt' }, small: { per: 4, cw: '86mm', lab: '11mm', fs: '13pt' } };
+/* scw: مقاس أصغر للبطاقات المشتركة لأن سطر الأسماء أطول */
+var SIZES = { big: { per: 1, cw: '186mm', scw: '178mm', lab: '16mm', fs: '24pt' }, mid: { per: 2, cw: '128mm', scw: '118mm', lab: '12mm', fs: '18pt' }, three: { per: 3, cw: '84mm', scw: '76mm', lab: '7mm', fs: '12pt' }, small: { per: 4, cw: '95mm', scw: '95mm', lab: '8mm', fs: '13pt' } };
 VIEWS.cards = function () {
   if (!DB.classes.length) return noClasses();
   var c = cls(UI.classId) || DB.classes[0]; UI.classId = c.id;
   var h = '<div class="box"><h2>طباعة بطاقات الطلاب</h2>';
   if ((UI.cWho || 'all') !== 'shared') h += '<label class="f">الفصل</label><select data-chg="cardsClass">' + classOptions(c.id) + '</select>';
-  h += '<label class="f">حجم البطاقة</label><select id="cSize"><option value="big">كبيرة: بطاقة في كل صفحة (للفصول الكبيرة والمسافات البعيدة)</option><option value="mid" selected>متوسطة: بطاقتان في كل صفحة</option><option value="small">صغيرة: أربع بطاقات في كل صفحة</option></select>';
+  h += '<label class="f">عدد البطاقات في الصفحة</label><select id="cSize"><option value="big">1 — بطاقة كبيرة (للفصول الكبيرة والمسافات البعيدة)</option><option value="mid" selected>2 — بطاقتان</option><option value="three">3 — ثلاث بطاقات</option><option value="small">4 — أربع بطاقات صغيرة</option></select>';
   var who = UI.cWho || 'all';
   h += '<label class="f">الطلاب</label><select id="cWho" data-chg="cWho">' + [['all', 'كل طلاب الفصل'], ['shared', 'بطاقات مشتركة لعدة فصول (تحت كل بطاقة أسماء من يشتركون في الرقم)'], ['blank', 'بطاقات بأرقام فقط بدون أسماء (١ إلى ٤٠)']].map(function (o) {
     return '<option value="' + o[0] + '"' + (who === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>';
@@ -483,7 +613,7 @@ ACT.printCards = function () {
     pages += '<div class="ppage' + (sz.per === 4 ? ' g4' : '') + '">' + list.slice(i, i + sz.per).map(function (s) { return cardHtml(s, who === 'blank' ? null : c); }).join('') + '</div>';
   }
   var p = document.getElementById('print');
-  p.style.cssText = '--cw:' + sz.cw + ';--lab:' + sz.lab + ';--fs:' + sz.fs;
+  p.style.cssText = '--cw:' + (who === 'shared' ? sz.scw : sz.cw) + ';--lab:' + sz.lab + ';--fs:' + sz.fs;
   p.innerHTML = pages;
   doPrint('p-cards');
 };
@@ -517,7 +647,7 @@ function liveSetup() {
     return '<li><label class="row grow" style="gap:10px;cursor:pointer"><input type="checkbox" class="lq" value="' + x.id + '" style="width:20px;height:20px"><span class="grow">' + esc(x.text) + '<span class="muted"> · ' + LBL(x.correct) + (x.unit ? ' · ' + esc(x.unit) : '') + '</span></span></label></li>';
   }).join('') + '</ul>';
   h += '<p id="liveErr" style="color:var(--bad);min-height:1em;margin:8px 0 0;font-size:14px"></p><div class="row"><button class="btn pri" data-act="startLive">بدء الأسئلة المختارة</button><button class="btn" data-act="startQuick">سؤال سريع بدون نص</button></div>';
-  h += '<p class="muted">السؤال السريع: تطرح السؤال شفهيًا أو من الكتاب، وتحدد الإجابة الصحيحة عند عرض النتيجة.</p></div>';
+  h += '<p class="muted">السؤال السريع: تطرح السؤال شفهيًا أو من الكتاب، وتحدد الإجابة الصحيحة عند عرض النتيجة.</p></div>' + linkBox();
   return h;
 }
 CHG.liveClass = function (s) { LIVE.classId = s.value; render(); };
@@ -548,6 +678,7 @@ function liveScan() {
   var h = '<div class="box' + (UI.big ? ' live-big' : '') + '"><div class="qbar"><div><div class="muted">' + esc(c.name) + ' · السؤال ' + (LIVE.idx + 1) + ' من ' + LIVE.queue.length + '</div><div class="qtext">' + esc(r.qText) + '</div>';
   if (r.options.some(Boolean)) h += '<div class="muted" style="font-size:16px">' + r.options.map(function (o, i) { return o ? LBL(QC.LETTERS[i]) + ': ' + esc(o) : ''; }).filter(Boolean).join(' &nbsp; ') + '</div>';
   h += '</div><div class="count"><span id="cnt">' + n + '</span> / ' + r.roster.length + '</div></div>';
+  if (Link.cfg) h += '<div style="font-size:13px" id="linkSt">' + Link.statusText() + '</div>';
   if (LIVE.phase === 'scan') h += '<div class="cam' + (UI.smallCam ? ' small' : '') + '" id="cam"><video playsinline muted autoplay></video><canvas></canvas></div><div class="muted" id="scanStatus" style="text-align:center;min-height:1.6em">جارٍ تشغيل الكاميرا…</div>';
   else h += '<p class="note" style="margin:10px 0">القراءة متوقفة. يمكنك المتابعة أو عرض النتيجة.</p>';
   h += '<div class="grid" id="grid">' + r.roster.map(function (sid) {
@@ -573,12 +704,13 @@ function onRead(no, letter) {
   document.getElementById('cnt').textContent = Object.keys(ans).length;
   if (st) st.textContent = 'آخر قراءة: رقم ' + no;
   if (isNew) Beep.play();
+  Link.sync();
 }
 ACT.cellTap = function (b) {
   var sid = b.dataset.sid, r = LIVE.rec; if (!r.answers[sid]) return;
   var s = stu(cls(LIVE.classId), sid);
   if (!confirm('مسح استجابة الطالب رقم ' + (s ? s.no : '') + '؟')) return;
-  delete r.answers[sid]; b.classList.remove('got'); document.getElementById('cnt').textContent = Object.keys(r.answers).length;
+  delete r.answers[sid]; b.classList.remove('got'); document.getElementById('cnt').textContent = Object.keys(r.answers).length; Link.sync();
 };
 ACT.pauseScan = function () { Scanner.stop(); LIVE.phase = 'paused'; render(); };
 ACT.resumeScan = function () { LIVE.phase = 'scan'; render(); };
@@ -633,7 +765,8 @@ var Beep = { on: true, ctx: null,
 /* ---------- قارئ البطاقات ---------- */
 var Scanner = {
   stream: null, video: null, overlay: null, running: false, tiles: [], ti: 0, boxes: [], detector: null, work: null,
-  attach: function (camEl) {
+  attach: function (camEl, handler, hint) {
+    this.handler = handler || function (r) { if (r.no != null) onRead(r.no, r.letter); }; this.raw = !!handler;
     var self = this; this.video = camEl.querySelector('video'); this.overlay = camEl.querySelector('canvas');
     var st = document.getElementById('scanStatus');
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { st.textContent = 'الكاميرا غير متاحة. افتح الصفحة من رابط يبدأ بـ https أو من متصفح سفاري أو كروم.'; return; }
@@ -641,7 +774,7 @@ var Scanner = {
       self.stream = stream; self.video.srcObject = stream;
       self.video.play().catch(function () {});
       self.video.onloadedmetadata = function () { self.tiles = QC.tilePlan(self.video.videoWidth, self.video.videoHeight); };
-      self.running = true; st.textContent = 'وجّه الكاميرا نحو بطاقات الطلاب'; self.loop();
+      if (!self.running) { self.running = true; self.loop(); } st.textContent = hint || 'وجّه الكاميرا نحو بطاقات الطلاب';
     };
     var start = this.stream ? Promise.resolve(this.stream) : navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
     start.then(go).catch(function () { st.textContent = 'لم يُسمح باستخدام الكاميرا. اسمح بها من إعدادات المتصفح ثم أعد المحاولة.'; });
@@ -673,7 +806,7 @@ var Scanner = {
     if (!this.running) return;
     var v = this.video;
     if (!v || !v.videoWidth || v.readyState < 2) { setTimeout(function () { self.loop(); }, 120); return; }
-    var W = v.videoWidth, H = v.videoHeight, t0 = performance.now(), emit = function (rs) { rs.forEach(function (r) { onRead(r.no, r.letter); }); };
+    var W = v.videoWidth, H = v.videoHeight, t0 = performance.now(), emit = function (rs) { rs.forEach(function (r) { if (self.running) self.handler(r); }); };
     if (!this.tiles.length) this.tiles = QC.tilePlan(W, H);
     var finish = function () {
       try {
@@ -690,6 +823,7 @@ var Scanner = {
     if (this.detector) {
       this.detector.detect(v).then(function (codes) {
         codes.forEach(function (c) {
+          if (self.raw) { if (self.running) self.handler({ data: c.rawValue, no: QC.parse(c.rawValue) }); return; }
           if (QC.parse(c.rawValue) == null) return;
           var b = c.boundingBox, p = Math.max(b.width, b.height) * 0.35;
           var x = Math.max(0, b.x - p), y = Math.max(0, b.y - p);
@@ -709,6 +843,181 @@ var Scanner = {
   }
 };
 document.addEventListener('visibilitychange', function () { if (document.hidden && LIVE.phase === 'scan') { Scanner.stop(); LIVE.phase = 'paused'; if (VIEW === 'live') render(); } });
+
+/* ================= شاشة العرض والربط ================= */
+function lsGet(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } }
+function lsSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+
+/* جهة الجوال: ترسل حالة السؤال الحالي إلى شاشة العرض */
+var Link = {
+  cfg: null, client: null, key: null, last: '', lastHello: 0, timer: null,
+  start: function () {
+    var self = this; this.cfg = lsGet('qcards-link'); if (!this.cfg || !Pair.parse(Pair.text(this.cfg))) { this.cfg = null; return; }
+    Crypt.key(this.cfg.key).then(function (k) { self.key = k; });
+    this.client = new Mqtt.Client(RELAYS[this.cfg.b]);
+    this.client.subscribe(TOPIC + this.cfg.room + '/d');
+    this.client.onstate = function (up) { if (up) { self.last = ''; self.sync(); } self.paintStatus(); };
+    this.client.onmessage = function (t, p) {
+      if (!self.key || !p.length) return;
+      Crypt.open(self.key, p).then(function (m) { if (m && m.hello) { var was = self.online(); self.lastHello = Date.now(); if (!was) { self.last = ''; self.sync(); } self.paintStatus(); } }).catch(function () {});
+    };
+  },
+  set: function (cfg) { this.stop(); lsSet('qcards-link', cfg); this.start(); },
+  stop: function () { if (this.client) this.client.close(); this.client = null; this.key = null; this.lastHello = 0; },
+  unpair: function () {
+    var c = this.client, cfg = this.cfg;
+    if (c && cfg) c.publish(TOPIC + cfg.room + '/s', new Uint8Array(0), true);
+    var self = this; setTimeout(function () { self.stop(); }, 300);
+    lsSet('qcards-link', null); this.cfg = null;
+  },
+  online: function () { return Date.now() - this.lastHello < 30000; },
+  statusText: function () {
+    if (!this.cfg) return 'غير مربوط';
+    if (!this.client || !this.client.ok) return 'جارٍ الاتصال بالخادم…';
+    return this.online() ? 'شاشة العرض متصلة' : 'مربوط — بانتظار فتح شاشة العرض';
+  },
+  paintStatus: function () { var el = document.getElementById('linkSt'); if (el) { el.textContent = this.statusText(); el.style.color = this.online() ? 'var(--ok)' : 'var(--muted)'; } },
+  state: function () {
+    if (LIVE.phase === 'setup' || !LIVE.rec) return { v: 1, phase: 'idle' };
+    var c = cls(LIVE.classId), r = LIVE.rec, no = function (sid) { var s = stu(c, sid); return s ? s.no : 0; };
+    var st = { v: 1, phase: LIVE.phase, cls: c ? c.name : '', idx: LIVE.idx + 1, total: LIVE.queue.length, q: r.qText, opts: r.options,
+      roster: r.roster.map(function (sid) { var s = stu(c, sid); return s ? [s.no, s.name] : null; }).filter(Boolean),
+      got: Object.keys(r.answers).map(no) };
+    if (LIVE.phase === 'result' && r.correct) {
+      var t = QC.tally(r);
+      st.res = { correct: r.correct, dist: t.dist, ok: t.correctIds.map(no), bad: t.wrongIds.map(no), abs: t.absentIds.map(no) };
+    }
+    return st;
+  },
+  sync: function () {
+    var self = this; if (!this.cfg || !this.client || !this.client.ok) return;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(function () {
+      if (!self.key) { self.timer = setTimeout(function () { self.sync(); }, 300); return; }
+      var s = self.state(), j = JSON.stringify(s); if (j === self.last) return;
+      self.last = j;
+      Crypt.seal(self.key, s).then(function (u8) { if (!self.client.publish(TOPIC + self.cfg.room + '/s', u8, true)) self.last = ''; });
+    }, 150);
+  }
+};
+setInterval(function () { Link.paintStatus(); }, 5000);
+
+/* ربط الجوال: تصوير كود الربط من شاشة العرض */
+VIEWS.pair = function () {
+  return '<div class="box"><h2>ربط بشاشة العرض</h2><p class="muted" style="margin-top:0">افتح البرنامج على اللابتوب واختر «شاشة العرض»، ثم وجّه الكاميرا نحو كود الربط الظاهر عليها.</p>' +
+    '<div class="cam" id="cam"><video playsinline muted autoplay></video><canvas></canvas></div><div class="muted" id="scanStatus" style="text-align:center;min-height:1.6em">جارٍ تشغيل الكاميرا…</div>' +
+    '<div class="row"><button class="btn" data-go="live">إلغاء</button></div></div>';
+};
+AFTER.pair = function () {
+  Scanner.attach(document.getElementById('cam'), function (r) {
+    var cfg = Pair.parse(r.data); if (!cfg) return;
+    Scanner.stop(); Link.set(cfg); go('live'); toast('تم الربط بشاشة العرض');
+  }, 'وجّه الكاميرا نحو كود الربط');
+};
+ACT.unpair = function () { if (!confirm('إلغاء الربط مع شاشة العرض؟')) return; Link.unpair(); render(); };
+function linkBox() {
+  return '<div class="box"><h3>شاشة العرض على اللابتوب</h3><div class="row" style="justify-content:space-between"><span id="linkSt" class="muted">' + Link.statusText() + '</span><span class="row">' +
+    (Link.cfg ? '<button class="btn sm" data-go="pair">ربط بشاشة أخرى</button><button class="btn sm bad" data-act="unpair">إلغاء الربط</button>' : '<button class="btn sm pri" data-go="pair">ربط بشاشة العرض</button>') +
+    '</span></div><p class="muted" style="margin-bottom:0">تحتاج اتصالًا بالإنترنت في الجهازين. تُرسل البيانات مشفّرة، والقراءة والحفظ يستمران في الجوال حتى لو انقطع الاتصال.</p></div>';
+}
+
+/* جهة اللابتوب: شاشة العرض */
+var Display = {
+  cfg: null, client: null, key: null, st: null, mode: lsGet('qcards-dmode') || 'both', creating: false, hello: null,
+  ensure: function () {
+    var self = this;
+    if (this.client || this.creating) return;
+    this.cfg = lsGet('qcards-display');
+    if (this.cfg && Pair.parse(Pair.text(this.cfg))) { this.connect(); return; }
+    this.creating = true; this.paint();
+    Mqtt.probe(RELAYS, 6000).then(function (b) {
+      self.creating = false;
+      if (b < 0) { self.err = 'تعذر الاتصال بخادم الربط. تأكد من الاتصال بالإنترنت ثم أعد المحاولة.'; self.paint(); return; }
+      self.err = null; self.cfg = Pair.make(b); lsSet('qcards-display', self.cfg); self.connect();
+    });
+  },
+  connect: function () {
+    var self = this, cfg = this.cfg;
+    var handle = function (p) {
+      if (!p.length) { self.st = null; self.paint(); return; }
+      Crypt.open(self.key, p).then(function (s) { self.st = s; self.seen = Date.now(); self.paint(); }).catch(function () {});
+    };
+    Crypt.key(cfg.key).then(function (k) { self.key = k; self.sayHello(); if (self.pending) { handle(self.pending); self.pending = null; } });
+    this.client = new Mqtt.Client(RELAYS[cfg.b]);
+    this.client.subscribe(TOPIC + cfg.room + '/s');
+    this.client.onstate = function () { self.sayHello(); self.paint(); };
+    this.client.onmessage = function (t, p) { if (!self.key) { self.pending = p; return; } handle(p); };
+    clearInterval(this.hello); this.hello = setInterval(function () { self.sayHello(); }, 10000);
+    this.paint();
+  },
+  sayHello: function () {
+    var self = this; if (!this.key || !this.client || !this.client.ok) return;
+    Crypt.seal(this.key, { hello: 1, t: Date.now() }).then(function (u8) { self.client.publish(TOPIC + self.cfg.room + '/d', u8, false); });
+  },
+  renew: function () {
+    if (this.client) { this.client.publish(TOPIC + this.cfg.room + '/s', new Uint8Array(0), true); this.client.close(); }
+    clearInterval(this.hello); this.client = null; this.key = null; this.st = null;
+    lsSet('qcards-display', null); this.cfg = null; this.ensure();
+  },
+  label: function (no, map) {
+    var n = map[no] || '';
+    return this.mode === 'no' || !n ? String(no) : this.mode === 'name' ? esc(n) : no + ' · ' + esc(n);
+  },
+  paint: function () {
+    if (VIEW !== 'display') return;
+    var el = document.getElementById('dispBody'); if (!el) return;
+    el.innerHTML = this.body();
+    if (!this.st || this.st.phase === 'idle') this.drawQr();
+  },
+  drawQr: function () {
+    var box = document.getElementById('pairQr'); if (!box || !this.cfg) return;
+    var txt = Pair.text(this.cfg), qr = qrcode(0, 'M'); qr.addData(txt); qr.make();
+    box.innerHTML = qr.createSvgTag({ cellSize: 6, margin: 3, scalable: true });
+    box.setAttribute('data-pair', txt);
+  },
+  body: function () {
+    var s = this.st, self = this;
+    if (this.err) return '<div class="box empty">' + this.err + '<br><button class="btn pri" data-act="dispRetry" style="margin-top:10px">إعادة المحاولة</button></div>';
+    if (!this.cfg) return '<div class="box empty">جارٍ تجهيز كود الربط…</div>';
+    var up = this.client && this.client.ok;
+    if (!s || s.phase === 'idle') {
+      return '<div class="box" style="text-align:center"><h2>' + (s ? 'الجوال مربوط — بانتظار بدء سؤال' : 'صوّر هذا الكود من الجوال') + '</h2>' +
+        '<div id="pairQr" style="width:min(320px,70vw);margin:10px auto;background:#fff;border-radius:12px;padding:6px"></div>' +
+        '<p class="muted">في الجوال: «الحصة المباشرة» ← «ربط بشاشة العرض».<br>حالة الخادم: ' + (up ? 'متصل' : 'جارٍ الاتصال…') + '</p>' +
+        '<button class="btn sm" data-act="dispRenew">إنشاء كود ربط جديد</button></div>';
+    }
+    var map = {}; s.roster.forEach(function (r) { map[r[0]] = r[1]; });
+    var got = {}; s.got.forEach(function (n) { got[n] = 1; });
+    var modeBar = '<div class="letters">' + [['no', 'الرقم'], ['name', 'الاسم'], ['both', 'الرقم والاسم']].map(function (m) {
+      return '<button class="btn sm' + (self.mode === m[0] ? ' on' : '') + '" data-act="dispMode" data-m="' + m[0] + '">' + m[1] + '</button>'; }).join('') + '</div>';
+    var h = '<div class="box disp disp-' + this.mode + '"><div class="row" style="justify-content:space-between"><span class="muted">' + esc(s.cls) + ' · السؤال ' + s.idx + ' من ' + s.total + (up ? '' : ' · <b style="color:var(--bad)">انقطع الاتصال</b>') + '</span>' + modeBar + '</div>';
+    h += '<div class="qbar" style="margin-top:8px"><div><div class="qtext" style="font-size:clamp(22px,3vw,40px)">' + esc(s.q) + '</div>';
+    if ((s.opts || []).some(Boolean)) h += '<div class="muted" style="font-size:clamp(16px,1.8vw,24px)">' + s.opts.map(function (o, i) { return o ? LBL(QC.LETTERS[i]) + ': ' + esc(o) : ''; }).filter(Boolean).join(' &nbsp; ') + '</div>';
+    h += '</div><div class="count" style="font-size:clamp(26px,3.5vw,48px)">' + s.got.length + ' / ' + s.roster.length + '</div></div>';
+    if (s.phase !== 'result' || !s.res) {
+      h += (s.phase === 'paused' ? '<p class="note">القراءة متوقفة</p>' : '') + '<div class="grid dgrid" style="margin-top:12px">' + s.roster.map(function (r) {
+        return '<div class="cell' + (got[r[0]] ? ' got' : '') + '">' + self.label(r[0], map) + '</div>'; }).join('') + '</div>';
+      return h + '</div>';
+    }
+    var R = s.res, part = R.ok.length + R.bad.length;
+    h += '<div class="stats" style="margin-top:12px">' + statBox('إجابة صحيحة', R.ok.length, 'ok') + statBox('إجابة خاطئة', R.bad.length, 'bad') + statBox('لم يشارك', R.abs.length) + statBox('نسبة الصواب من المشاركين', QC.pct(R.ok.length, part) + '%') + '</div>';
+    h += '<div class="bars" style="margin-top:14px">' + QC.LETTERS.map(function (l) {
+      var v = R.dist[l]; return '<div class="bar' + (l === R.correct ? ' right' : '') + '"><b>' + LBL(l) + '</b><div class="t"><i style="width:' + QC.pct(v, Math.max(1, part)) + '%"></i></div><span>' + v + '</span></div>'; }).join('') + '</div>';
+    var list = function (title, arr, k) {
+      return '<div style="margin-top:12px"><h3>' + title + ' (' + arr.length + ')</h3><div class="chips">' + (arr.map(function (n) { return '<span class="tag ' + k + '" style="font-size:16px;padding:3px 10px">' + self.label(n, map) + '</span>'; }).join('') || '<span class="muted">—</span>') + '</div></div>';
+    };
+    h += list('أجابوا إجابة صحيحة', R.ok, 'ok') + list('أجابوا إجابة خاطئة', R.bad, 'bad') + list('لم يشاركوا', R.abs, 'na');
+    return h + '</div>';
+  }
+};
+VIEWS.display = function () {
+  return '<div class="row noprint" style="justify-content:flex-end;margin-bottom:8px"><button class="btn sm" data-act="dispFull">ملء الشاشة</button></div><div id="dispBody"></div>';
+};
+AFTER.display = function () { Display.ensure(); Display.paint(); };
+ACT.dispMode = function (b) { Display.mode = b.dataset.m; lsSet('qcards-dmode', Display.mode); Display.paint(); };
+ACT.dispRenew = function () { if (confirm('إنشاء كود ربط جديد؟ سيتوقف الجوال المربوط حاليًا عن الإرسال لهذه الشاشة حتى تربطه من جديد.')) Display.renew(); };
+ACT.dispRetry = function () { Display.err = null; Display.ensure(); };
+ACT.dispFull = function () { try { var d = document.documentElement; (d.requestFullscreen || d.webkitRequestFullscreen).call(d); } catch (e) { toast('ملء الشاشة غير متاح في هذا المتصفح'); } };
 
 /* ================= التقارير ================= */
 function recordsFor(classIds) {
@@ -848,8 +1157,10 @@ CHG.importAll = function (inp) {
 ACT.wipe = function () { if (!confirm('حذف كل البيانات من هذا الجهاز؟ لا يمكن التراجع.')) return; if (!confirm('تأكيد أخير: هل صدّرت نسخة احتياطية؟')) return; DB = blank(); save(); render(); };
 
 /* ---------- البدء ---------- */
+Link.start();
 load();
 if (!DB.classes.length) VIEW = 'classes';
+try { if (sessionStorage.getItem('qcards-view') === 'display') VIEW = 'display'; } catch (e) {}
 render();
 if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(function () {});
 </script>
