@@ -1,0 +1,23 @@
+{
+ "name": "بطاقات الاستجابة",
+ "short_name": "بطاقات الاستجابة",
+ "lang": "ar",
+ "dir": "rtl",
+ "start_url": "./",
+ "scope": "./",
+ "display": "standalone",
+ "background_color": "#f6f5f1",
+ "theme_color": "#0f6e56",
+ "icons": [
+  {
+   "src": "icon-180.png",
+   "sizes": "180x180",
+   "type": "image/png"
+  },
+  {
+   "src": "icon-512.png",
+   "sizes": "512x512",
+   "type": "image/png"
+  }
+ ]
+}
